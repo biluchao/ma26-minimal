@@ -1,6 +1,29 @@
-"""m04_risk — Risk guard"""
+"""
+src/m04_risk/__init__.py
+M04 — 风控模块
 
-from .guard import RiskGuard, RiskState
+日亏熔断 / 单笔限额 / 滑点保护 / 仓位上限
+独立运行于策略之外，信号必经检查点
+"""
 
-__all__ = ['RiskGuard', 'RiskState']
+from .risk_guard import (
+    RiskGuard,
+    RiskRule,
+    RiskLevel,
+    RiskViolation,
+    RiskConfig,
+    DailyLossTracker,
+    DrawdownTracker,
+    SlippageProtector,
+)
 
+__all__ = [
+    "RiskGuard",
+    "RiskRule",
+    "RiskLevel",
+    "RiskViolation",
+    "RiskConfig",
+    "DailyLossTracker",
+    "DrawdownTracker",
+    "SlippageProtector",
+]
