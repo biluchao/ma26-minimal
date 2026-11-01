@@ -1,0 +1,6 @@
+"""m07_execution — Execution manager"""
+
+from .manager import ExecutionManager
+
+__all__ = ['ExecutionManager']
+
