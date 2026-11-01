@@ -1,41 +1,83 @@
-mode: paper
-symbol: BTCUSDT
-timeframe: 1h
+# config/paper.yaml
+# MA26-ATR 量化交易系统 v4.1.0-minimal — 模拟盘配置
+#
+# 说明:
+#   模拟盘模式连接交易所 WebSocket 接收实时行情，使用模拟撮合引擎。
+#   资金为虚拟资金，但行情和延迟为真实环境。
+#   当前最小运行集 paper 模式为架构预留，需后续接入 WebSocket 模块。
+#
+# 使用方式:
+#   python bootstrap.py --mode paper --config config/paper.yaml
 
-warmup:
-  bars: 35
+# ═══════════════════════════════════════════════════════════════
+# 系统全局
+# ═══════════════════════════════════════════════════════════════
+initial_equity: 100000.0
+snapshot_dir: ./snapshots/paper
 
+# ═══════════════════════════════════════════════════════════════
+# K线模块 (M03_Kline)
+# 模拟盘需要更大的滑动窗口以支持实时多周期计算
+# ═══════════════════════════════════════════════════════════════
+kline:
+  max_bars: 1000                # 模拟盘保留更多历史K线用于指标预热
+
+# ═══════════════════════════════════════════════════════════════
+# 策略模块 (M01_Strategy)
+# 模拟盘使用标准参数，贴近实盘预期
+# ═══════════════════════════════════════════════════════════════
 strategy:
   ma_period: 26
   atr_period: 14
-  trend_atr_mult: 0.5
-  attach_atr_dist: 0.5
-  detach_atr_mult: 0.3
-  trailing_atr_mult: 2.0
-  tp_atr_mult: 3.0
-  stop_atr_mult: 2.0
-  max_size_pct: 0.25
-  step_size: 0.001
-  min_qty: 0.001
-  min_notional: 10.0
+  band_multiplier: 0.5          # 标准检测带
+  detach_multiplier: 0.3        # 标准脱离判定
+  min_trend_strength: 0.6       # 标准趋势强度
 
+# ═══════════════════════════════════════════════════════════════
+# 风控模块 (M04_Risk)
+# 模拟盘风控略宽松于回测，用于测试真实波动下的系统表现
+# ═══════════════════════════════════════════════════════════════
 risk:
-  max_position_pct: 0.5
-  max_single_loss_pct: 0.02
-  max_daily_loss_pct: 0.03
-  max_drawdown_pct: 0.10
-  max_open_orders: 3
-  max_slippage_bps: 50
+  max_daily_loss_pct: 0.08      # 模拟盘允许较高日亏 (8%)
+  max_single_loss_pct: 0.03     # 单笔 3%
+  max_drawdown_pct: 0.25        # 最大回撤 25%
+  max_slippage_bps: 80          # 实时行情滑点容忍更高 (80 bps)
+  max_position_value_usdt: 20000.0  # 单标的名义价值上限
+  kill_switch_enabled: true
 
-equity:
-  initial_cash: 10000.0
+# ═══════════════════════════════════════════════════════════════
+# 数据源：实时 WebSocket
+# ═══════════════════════════════════════════════════════════════
+data_source: websocket
 
-state:
-  snapshot_interval_bars: 20
-  snapshots_keep: 100
+# WebSocket 连接配置
+websocket:
+  endpoint: wss://stream.binance.com:9443/ws
+  symbols:
+    - BTCUSDT
+  streams:
+    - kline_3m                  # 3分钟K线流
+    - ticker                    # 实时价格流
+  ping_interval: 20             # 心跳间隔 (秒)
+  reconnect_delay: 5            # 重连延迟 (秒)
+  max_reconnect_attempts: 10    # 最大重连次数
 
-simulator:
-  latency_ms: [5, 15]
-  fill_ratio: 0.95
-  commission_bps: 10
+# ═══════════════════════════════════════════════════════════════
+# 模拟撮合引擎
+# ═══════════════════════════════════════════════════════════════
+paper_execution:
+  enabled: true
+  slippage_bps: 10.0            # 模拟滑点 (10 bps = 0.1%)
+  latency_ms: 100               # 模拟网络延迟 (100ms)
+  fill_probability: 0.95        # 成交概率 (5% 部分成交/拒单)
+  commission_rate: 0.0004       # 手续费率 (0.04% taker)
+  min_order_size_usdt: 10.0     # 最小订单价值
 
+# ═══════════════════════════════════════════════════════════════
+# 运行控制
+# ═══════════════════════════════════════════════════════════════
+runtime:
+  tick_interval_ms: 3000        # 主循环 tick 间隔 (3秒)
+  health_check_interval: 30     # 健康检查间隔 (秒)
+  snapshot_interval: 300        # 自动快照间隔 (秒, 5分钟)
+  max_runtime_hours: 0          # 0 = 无限运行
