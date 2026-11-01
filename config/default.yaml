@@ -1,40 +1,61 @@
-# MA26-ATR Minimal Runtime — Backtest config
+# config/default.yaml
+# MA26-ATR 量化交易系统 v4.1.0-minimal — 默认配置
+#
+# 使用方式:
+#   python bootstrap.py --mode backtest --config config/default.yaml
+#   python bootstrap.py -m backtest -c config/default.yaml
 
-mode: backtest
-symbol: BTCUSDT
-timeframe: 1h
+# ═══════════════════════════════════════════════════════════════
+# 系统全局
+# ═══════════════════════════════════════════════════════════════
+initial_equity: 100000.0        # 初始权益 (USDT)
+snapshot_dir: ./snapshots       # 崩溃恢复快照存储目录
 
-warmup:
-  bars: 35
+# ═══════════════════════════════════════════════════════════════
+# K线模块 (M03_Kline)
+# ═══════════════════════════════════════════════════════════════
+kline:
+  max_bars: 500                 # 内存滑动窗口最大K线根数（3m周期）
 
+# ═══════════════════════════════════════════════════════════════
+# 策略模块 (M01_Strategy) — MA26 趋势系统
+# ═══════════════════════════════════════════════════════════════
 strategy:
-  ma_period: 26
-  atr_period: 14
-  trend_atr_mult: 0.5
-  attach_atr_dist: 0.5
-  detach_atr_mult: 0.3
-  trailing_atr_mult: 2.0
-  tp_atr_mult: 3.0
-  stop_atr_mult: 2.0
-  max_size_pct: 0.25
-  step_size: 0.001
-  min_qty: 0.001
-  min_notional: 10.0
-  qty_decimals: 3
-  price_decimals: 2
+  ma_period: 26                 # MA 均线周期（3分钟K线，26根=78分钟）
+  atr_period: 14                # ATR 波动率周期
+  band_multiplier: 0.5          # 检测带宽度 ±0.5×ATR（价格在此带内视为"贴线"）
+  detach_multiplier: 0.3        # 贴线脱离判定 ≥0.3×ATR（脱离带视为有效突破）
+  min_trend_strength: 0.6       # 趋势强度阈值 (0.0~1.0)，低于此值不生成信号
 
+# ═══════════════════════════════════════════════════════════════
+# 风控模块 (M04_Risk) — 独立熔断与限额
+# ═══════════════════════════════════════════════════════════════
 risk:
-  max_position_pct: 0.95
-  max_single_loss_pct: 0.02
-  max_daily_loss_pct: 0.05
-  max_drawdown_pct: 0.15
-  max_open_orders: 5
-  max_slippage_bps: 50
+  max_daily_loss_pct: 0.05      # 日亏熔断线 (5% of equity)
+  max_single_loss_pct: 0.02     # 单笔最大亏损 (2% of equity)
+  max_drawdown_pct: 0.20        # 最大回撤硬限 (20%)
+  max_slippage_bps: 50          # 下单滑点保护 (50 bps = 0.5%)
+  max_position_value_usdt: 10000.0  # 单标的名义价值上限
+  kill_switch_enabled: true     # 全局一键熔断（触发后拒绝所有新订单）
 
-equity:
-  initial_cash: 10000.0
+# ═══════════════════════════════════════════════════════════════
+# 回测数据配置
+# ═══════════════════════════════════════════════════════════════
+data_source: generated          # 数据源: generated (内置生成器) | csv (外部文件)
 
-state:
-  snapshot_interval_bars: 50
-  snapshots_keep: 100
+# 生成器参数 (data_source: generated)
+n_bars: 100                    # 回放K线总数
+start_price: 50000.0           # BTCUSDT 起始价格
+seed: 42                       # 随机种子（保证回测结果可复现）
 
+# 市场类型
+market_type: trend             # trend (趋势上升/下降) | ranging (均值回归震荡)
+
+# 趋势市场参数 (market_type: trend)
+trend_strength: 0.003          # 每根K线的趋势偏移量 (占价格的 0.3%)
+
+# 震荡市场参数 (market_type: ranging)
+amplitude: 0.01               # 震荡幅度 (占价格的 1%)
+
+# CSV 数据源 (data_source: csv, 暂未实现)
+data_file: ""                  # 历史数据 CSV 路径，格式: timestamp,open,high,low,close,volume
