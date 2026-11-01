@@ -1,0 +1,12 @@
+__pycache__
+*.pyc
+.git
+.gitignore
+tests/
+tools/
+docs/
+snapshots_*
+traces/
+data/
+*.md
+
