@@ -1,434 +1,780 @@
 """
-src/m01_strategy/ma26_strategy.py
-M01 — MA26-ATR 趋势策略引擎
+src/modules/strategy/ma26_strategy.py
+MA26-ATR 量化交易系统 — 策略模块：MA26-ATR 趋势策略
 
-策略核心逻辑（v4.0.0 规格书）:
-─────────────────────────────
-1. MA26 趋势判定
-   - MA26 = 最近26根收盘价的简单移动平均
-   - direction = BULL 当 close > MA26
-   - direction = BEAR 当 close < MA26
+策略逻辑:
+  1. 趋势判断：价格与 MA26 的关系 + 趋势强度过滤
+  2. 入场信号：价格偏离 MA 超过 band_multiplier × ATR（突破通道）
+  3. 出场信号：价格回归 MA 或 detach 条件触发
+  4. 仓位管理：基于 ATR 动态计算仓位大小
+  5. 与风控模块联动（下单前必须通过 m04_risk 校验）
 
-2. ATR14 检测带
-   - ATR14 = 最近14根的真实波幅平均
-   - 上轨 = MA26 + 0.5 * ATR14
-   - 下轨 = MA26 - 0.5 * ATR14
-   - 贴线 = close 落在 [下轨, 上轨] 区间内
-
-3. 贴线脱离判定
-   - 脱离 = close 从贴线状态突破上轨（BULL）或跌破下轨（BEAR）
-   - 脱离幅度 >= 0.3 * ATR14 视为有效脱离
-
-4. 信号生成
-   - BULL 有效脱离 → OPEN_LONG
-   - BEAR 有效脱离 → OPEN_SHORT（如允许做空）
-   - 贴线内不交易
-
-状态机:
-  FLAT → (贴线脱离) → POSITION
-  POSITION → (止盈/止损/反向信号) → FLAT
+  信号生成流程:
+    on_kline_update()
+      → 更新指标（MA26, ATR）
+      → 计算通道上下轨
+      → 检测突破/回归
+      → 生成 Signal 事件 → EventBus
+      → 风控模块消费 → 执行模块消费
 """
+
 import time
-from collections import deque
+import threading
 from dataclasses import dataclass, field
-from typing import Optional, List, Tuple
+from typing import Dict, List, Optional, Tuple, Any
+from enum import Enum
+import math
 
-from core.result import Result, Error, ErrorSeverity
-from core.event_bus import EventBus, EventType
-from core.trace_context import TraceContext, TraceManager
-from core.state_registry import StateRegistry
-from core.lifecycle import SystemModule
+from src.core.result import Result, Error, ErrorSeverity, ErrorCategory
+from src.core.lifecycle import LifecycleAware
+from src.core.event_bus import EventBus, Event, EventType, get_global_event_bus
+from src.core.state_registry import get_global_state_registry
+from src.core.config import get_global_config_manager, get_config
 
 
 # ═══════════════════════════════════════════════════════════════
-# 数据结构
+# 信号类型
+# ═══════════════════════════════════════════════════════════════
+
+class SignalType(Enum):
+    """交易信号类型"""
+    BUY = "buy"                    # 做多入场
+    SELL = "sell"                  # 做空入场
+    CLOSE_LONG = "close_long"      # 平多
+    CLOSE_SHORT = "close_short"    # 平空
+    STOP_LOSS = "stop_loss"        # 止损
+    TAKE_PROFIT = "take_profit"    # 止盈
+
+
+class SignalStrength(Enum):
+    """信号强度"""
+    WEAK = 1        # 弱信号（观望或小仓位）
+    MODERATE = 2    # 中等信号
+    STRONG = 3      # 强信号（满仓或加仓）
+
+
+# ═══════════════════════════════════════════════════════════════
+# 信号数据类
 # ═══════════════════════════════════════════════════════════════
 
 @dataclass
-class Bar:
-    """单根K线"""
-    bar_index: int = 0
-    timestamp: int = 0
-    open: float = 0.0
-    high: float = 0.0
-    low: float = 0.0
-    close: float = 0.0
-    volume: float = 0.0
+class TradeSignal:
+    """
+    交易信号 — 策略生成的交易指令。
+    """
+    signal_type: SignalType
+    symbol: str
+    price: float
+    timestamp: int                    # 毫秒时间戳
+    strength: SignalStrength = SignalStrength.MODERATE
 
-    def __post_init__(self):
-        if self.timestamp == 0:
-            self.timestamp = int(time.time() * 1000)
-
-
-@dataclass
-class SignalRequest:
-    """交易信号"""
-    signal_id: str = ""
-    action: str = ""           # OPEN_LONG / CLOSE_LONG / OPEN_SHORT / CLOSE_SHORT
-    direction: str = ""        # BULL / BEAR
-    source: str = "ma26_strategy"
-    qty: float = 0.0
-    price: float = 0.0
-    order_type: str = "LIMIT"
-    strength: float = 0.0
-    trace_id: str = ""
-    bar_index: int = 0
-    extra: dict = field(default_factory=dict)
-
-
-@dataclass
-class IndicatorState:
-    """指标状态快照"""
+    # 指标快照
     ma26: float = 0.0
-    atr14: float = 0.0
-    upper_band: float = 0.0    # MA26 + 0.5 * ATR14
-    lower_band: float = 0.0    # MA26 - 0.5 * ATR14
-    is_tape: bool = False       # 是否贴线
-    direction: str = "FLAT"     # BULL / BEAR / FLAT
+    atr: float = 0.0
+    upper_band: float = 0.0
+    lower_band: float = 0.0
+
+    # 仓位建议
+    suggested_size: float = 0.0       # 建议仓位大小（基础货币）
+    suggested_size_quote: float = 0.0 # 建议仓位大小（计价货币）
+
+    # 风控参数
+    stop_loss_price: float = 0.0
+    take_profit_price: float = 0.0
+
+    # 元数据
+    reason: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {
+            'signal_type': self.signal_type.value,
+            'symbol': self.symbol,
+            'price': self.price,
+            'timestamp': self.timestamp,
+            'strength': self.strength.value,
+            'ma26': self.ma26,
+            'atr': self.atr,
+            'upper_band': self.upper_band,
+            'lower_band': self.lower_band,
+            'suggested_size': self.suggested_size,
+            'stop_loss_price': self.stop_loss_price,
+            'take_profit_price': self.take_profit_price,
+            'reason': self.reason,
+        }
 
 
 # ═══════════════════════════════════════════════════════════════
-# 指标计算器
+# K线数据
 # ═══════════════════════════════════════════════════════════════
 
-class MA26Calculator:
-    """MA26 简单移动平均计算器"""
+@dataclass
+class Kline:
+    """
+    K线数据。
+    """
+    symbol: str
+    open_time: int
+    close_time: int
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
 
-    def __init__(self, period: int = 26):
-        self.period = period
-        self._closes = deque(maxlen=period)
-        self._sum = 0.0
+    def typical_price(self) -> float:
+        """典型价格 (H+L+C)/3"""
+        return (self.high + self.low + self.close) / 3
 
-    def update(self, bar: Bar) -> float:
-        if len(self._closes) == self.period:
-            self._sum -= self._closes[0]
-        self._closes.append(bar.close)
-        self._sum += bar.close
-        return self.get_value()
+    def hl2(self) -> float:
+        """(H+L)/2"""
+        return (self.high + self.low) / 2
 
-    def get_value(self) -> float:
-        if len(self._closes) < self.period:
-            return 0.0
-        return self._sum / len(self._closes)
+    def hlc3(self) -> float:
+        """(H+L+C)/3"""
+        return self.typical_price()
 
-    def is_ready(self) -> bool:
-        return len(self._closes) >= self.period
-
-    def reset(self):
-        self._closes.clear()
-        self._sum = 0.0
+    def ohlc4(self) -> float:
+        """(O+H+L+C)/4"""
+        return (self.open + self.high + self.low + self.close) / 4
 
 
-class ATR14Calculator:
-    """ATR14 平均真实波幅计算器"""
+# ═══════════════════════════════════════════════════════════════
+# 指标计算
+# ═══════════════════════════════════════════════════════════════
 
-    def __init__(self, period: int = 14):
-        self.period = period
-        self._values = deque(maxlen=period)
-        self._prev_close: Optional[float] = None
+class IndicatorEngine:
+    """
+    指标计算引擎 — 纯函数式指标计算。
+    不依赖任何外部状态，便于测试和回测。
+    """
 
-    def update(self, bar: Bar) -> float:
-        if self._prev_close is not None:
+    @staticmethod
+    def sma(values: List[float], period: int) -> Optional[float]:
+        """简单移动平均"""
+        if len(values) < period:
+            return None
+        return sum(values[-period:]) / period
+
+    @staticmethod
+    def ema(values: List[float], period: int) -> Optional[float]:
+        """指数移动平均"""
+        if len(values) < period:
+            return None
+        multiplier = 2.0 / (period + 1)
+        ema_val = sum(values[:period]) / period
+        for price in values[period:]:
+            ema_val = (price - ema_val) * multiplier + ema_val
+        return ema_val
+
+    @staticmethod
+    def atr(klines: List[Kline], period: int) -> Optional[float]:
+        """
+        平均真实波幅 (ATR)。
+        使用 Wilder 平滑法。
+        """
+        if len(klines) < period:
+            return None
+
+        tr_values = []
+        for i in range(1, len(klines)):
+            high = klines[i].high
+            low = klines[i].low
+            prev_close = klines[i-1].close
             tr = max(
-                bar.high - bar.low,
-                abs(bar.high - self._prev_close),
-                abs(bar.low - self._prev_close),
+                high - low,
+                abs(high - prev_close),
+                abs(low - prev_close),
             )
-            self._values.append(tr)
-        self._prev_close = bar.close
-        return self.get_value()
+            tr_values.append(tr)
 
-    def get_value(self) -> float:
-        if not self._values:
+        if len(tr_values) < period:
+            return None
+
+        # Wilder 平滑
+        atr_val = sum(tr_values[:period]) / period
+        for tr in tr_values[period:]:
+            atr_val = (atr_val * (period - 1) + tr) / period
+
+        return atr_val
+
+    @staticmethod
+    def true_range(kline: Kline, prev_close: Optional[float] = None) -> float:
+        """真实波幅 (单根)"""
+        if prev_close is None:
+            return kline.high - kline.low
+        return max(
+            kline.high - kline.low,
+            abs(kline.high - prev_close),
+            abs(kline.low - prev_close),
+        )
+
+    @staticmethod
+    def rsi(closes: List[float], period: int = 14) -> Optional[float]:
+        """相对强弱指数 (RSI)"""
+        if len(closes) < period + 1:
+            return None
+
+        gains = []
+        losses = []
+        for i in range(1, len(closes)):
+            change = closes[i] - closes[i-1]
+            if change > 0:
+                gains.append(change)
+                losses.append(0.0)
+            else:
+                gains.append(0.0)
+                losses.append(abs(change))
+
+        if len(gains) < period:
+            return None
+
+        avg_gain = sum(gains[:period]) / period
+        avg_loss = sum(losses[:period]) / period
+
+        for i in range(period, len(gains)):
+            avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+            avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+
+        if avg_loss == 0:
+            return 100.0
+
+        rs = avg_gain / avg_loss
+        return 100.0 - (100.0 / (1 + rs))
+
+    @staticmethod
+    def trend_strength(klines: List[Kline], ma_period: int = 26) -> float:
+        """
+        计算趋势强度 [0, 1]。
+        基于价格与 MA 的距离 + 连续同向K线数量。
+        """
+        if len(klines) < ma_period:
             return 0.0
-        return sum(self._values) / len(self._values)
 
-    def is_ready(self) -> bool:
-        return len(self._values) >= self.period
+        closes = [k.close for k in klines]
+        ma = IndicatorEngine.sma(closes, ma_period)
+        if ma is None or ma == 0:
+            return 0.0
 
-    def reset(self):
-        self._values.clear()
-        self._prev_close = None
+        current_price = closes[-1]
+        distance = abs(current_price - ma) / ma
+
+        # 连续同向计数
+        consecutive = 0
+        direction = 1 if current_price > ma else -1
+        for i in range(len(closes) - 1, 0, -1):
+            if (closes[i] > ma and direction > 0) or (closes[i] < ma and direction < 0):
+                consecutive += 1
+            else:
+                break
+
+        # 综合评分
+        distance_score = min(distance / 0.05, 1.0)   # 5% 偏离 = 满分
+        consecutive_score = min(consecutive / 10, 1.0) # 10根连续 = 满分
+
+        return (distance_score * 0.6 + consecutive_score * 0.4)
 
 
 # ═══════════════════════════════════════════════════════════════
-# 策略引擎
+# MA26-ATR 策略模块
 # ═══════════════════════════════════════════════════════════════
 
-class MA26StrategyEngine(SystemModule):
+class MA26Strategy(LifecycleAware):
     """
-    MA26-ATR 趋势策略引擎。
+    MA26-ATR 趋势策略模块。
 
-    继承 SystemModule，实现统一生命周期契约。
-    通过 EventBus 发布信号事件，不直接调用其他模块。
+    策略规则:
+      做多条件:
+        1. 价格 > MA26（趋势向上）
+        2. 趋势强度 > trend_strength 阈值
+        3. 价格从下方突破 lower_band（均值回归）或 upper_band（动量突破）
+
+      做空条件:
+        1. 价格 < MA26（趋势向下）
+        2. 趋势强度 > trend_strength 阈值
+        3. 价格从上方突破 upper_band
+
+      平仓条件:
+        1. 价格回归 MA26 附近（detach 以内）
+        2. 或止损触发
+        3. 或趋势反转
+
+    仓位计算:
+      size = (equity × risk_per_trade) / ATR
     """
 
-    MODULE_NAME = "M01_StrategyEngine"
-    MODULE_VERSION = "4.1.0"
-    DEPENDENCIES = ["M04_RiskGuard", "M07_ExecutionManager"]
+    def __init__(
+        self,
+        symbol: str = "BTCUSDT",
+        ma_period: int = 26,
+        atr_period: int = 14,
+        band_multiplier: float = 0.5,
+        detach: float = 0.3,
+        trend_strength: float = 0.6,
+        risk_per_trade: float = 0.02,
+        max_position_size: float = 10000.0,
+        kline_max_bars: int = 500,
+    ):
+        self._symbol = symbol
+        self._ma_period = ma_period
+        self._atr_period = atr_period
+        self._band_multiplier = band_multiplier
+        self._detach = detach
+        self._trend_strength = trend_strength
+        self._risk_per_trade = risk_per_trade
+        self._max_position_size = max_position_size
+        self._kline_max_bars = kline_max_bars
 
-    def __init__(self):
-        super().__init__()
-        self._ma26 = MA26Calculator()
-        self._atr14 = ATR14Calculator()
-        self._state = IndicatorState()
-        self._position_side: str = "FLAT"   # FLAT / LONG / SHORT
-        self._warmup_bars: int = 35
-        self._bar_count: int = 0
-        self._tape_band_mult: float = 0.5    # 检测带倍数
-        self._breakout_mult: float = 0.3     # 脱离幅度倍数
-        self._allow_short: bool = False
-        self._last_signal_bar: int = -999
-        self._signal_dedup_bars: int = 3
-        self._signals_generated: int = 0
-        self._bars_processed: int = 0
+        # 运行时状态
+        self._klines: List[Kline] = []
+        self._running = False
+        self._lock = threading.RLock()
+        self._position = 0          # 0=空仓, >0=多仓, <0=空仓
+        self._entry_price = 0.0
+        self._entry_time = 0
+        self._last_signal: Optional[TradeSignal] = None
+        self._signal_count = 0
+        self._last_kline_time = 0
 
-    # ─── 生命周期 ───
+        # 外部依赖
+        self._event_bus: Optional[EventBus] = None
+        self._config_mgr = None
 
-    def configure(self, config) -> Result[None, Error]:
-        cs = config.get('strategy', {})
-        self._ma26.period = cs.get('ma_period', 26)
-        self._atr14.period = cs.get('atr_period', 14)
-        self._warmup_bars = cs.get('warmup_bars', self._ma26.period + 10)
-        self._tape_band_mult = cs.get('tape_band_multiplier', 0.5)
-        self._breakout_mult = cs.get('breakout_multiplier', 0.3)
-        self._allow_short = cs.get('allow_short', False)
-        self._signal_dedup_bars = cs.get('signal_dedup_bars', 3)
+    # ─── LifecycleAware 接口 ─────────────────────────────────
 
-        # 重建计算器（周期可能变了）
-        self._ma26 = MA26Calculator(self._ma26.period)
-        self._atr14 = ATR14Calculator(self._atr14.period)
+    @property
+    def module_name(self) -> str:
+        return "m01_strategy"
+
+    @property
+    def dependencies(self) -> List[str]:
+        return ["core_config", "core_event_bus", "core_state"]
+
+    @property
+    def init_timeout_ms(self) -> int:
+        return 15000
+
+    @property
+    def start_timeout_ms(self) -> int:
+        return 10000
+
+    @property
+    def drain_timeout_ms(self) -> int:
+        return 5000
+
+    def on_init(self) -> Result[None]:
+        """初始化策略"""
+        # 获取配置
+        try:
+            self._config_mgr = get_global_config_manager()
+        except Exception:
+            pass
+
+        if self._config_mgr:
+            self._ma_period = self._config_mgr.get_int("strategy.ma_period", self._ma_period)
+            self._atr_period = self._config_mgr.get_int("strategy.atr_period", self._atr_period)
+            self._band_multiplier = self._config_mgr.get_float("strategy.band_multiplier", self._band_multiplier)
+            self._detach = self._config_mgr.get_float("strategy.detach", self._detach)
+            self._trend_strength = self._config_mgr.get_float("strategy.trend_strength", self._trend_strength)
+            self._risk_per_trade = self._config_mgr.get_float("risk.max_position_risk", self._risk_per_trade)
+            self._max_position_size = self._config_mgr.get_float("execution.max_position_size", self._max_position_size)
+            self._symbol = self._config_mgr.get_str("strategy.symbol", self._symbol)
+            self._kline_max_bars = self._config_mgr.get_int("kline.max_bars", self._kline_max_bars)
+
+        # 获取事件总线
+        try:
+            self._event_bus = get_global_event_bus()
+        except Exception:
+            pass
+
         return Result.ok(None)
 
-    def _do_start(self) -> Result[None, Error]:
+    def on_start(self) -> Result[None]:
+        """启动策略"""
+        self._running = True
+
+        # 订阅 K线更新事件
         if self._event_bus:
-            self._event_bus.subscribe(EventType.BAR_PROCESSED, self._on_bar_event)
+            self._event_bus.subscribe(
+                EventType.KLINE_UPDATE,
+                self._on_kline_event,
+            )
+            self._event_bus.subscribe(
+                EventType.TRADE_UPDATE,
+                self._on_trade_event,
+            )
+
         return Result.ok(None)
 
-    def _do_stop(self) -> Result[None, Error]:
-        self._ma26.reset()
-        self._atr14.reset()
+    def on_drain(self) -> Result[None]:
+        """优雅停机：停止处理新信号"""
+        self._running = False
         return Result.ok(None)
 
-    # ─── 指标计算 ───
+    def on_stop(self) -> Result[None]:
+        """停止策略"""
+        self._running = False
 
-    def update_indicators(self, bar: Bar) -> Result[IndicatorState, Error]:
-        """更新 MA26 / ATR14 / 检测带状态"""
-        if bar.close <= 0:
-            return Result.err(Error(
-                "INVALID_BAR", f"Bar close must be positive, got {bar.close}",
-                ErrorSeverity.RECOVERABLE, self.MODULE_NAME,
-                context={'bar_index': bar.bar_index},
+        # 取消订阅
+        if self._event_bus:
+            try:
+                self._event_bus.unsubscribe(
+                    EventType.KLINE_UPDATE,
+                    self._on_kline_event,
+                )
+            except Exception:
+                pass
+
+        # 清空数据
+        with self._lock:
+            self._klines.clear()
+
+        return Result.ok(None)
+
+    def on_health_check(self) -> Result[dict]:
+        return Result.ok({
+            "running": self._running,
+            "kline_count": len(self._klines),
+            "position": self._position,
+            "entry_price": self._entry_price,
+            "signal_count": self._signal_count,
+            "last_kline_time": self._last_kline_time,
+        })
+
+    # ─── 事件处理 ─────────────────────────────────────────────
+
+    def _on_kline_event(self, event: Event):
+        """处理 K线更新事件"""
+        if not self._running:
+            return
+
+        payload = event.payload
+        try:
+            kline = Kline(
+                symbol=payload.get('symbol', self._symbol),
+                open_time=payload.get('open_time', 0),
+                close_time=payload.get('close_time', 0),
+                open=float(payload.get('open', 0)),
+                high=float(payload.get('high', 0)),
+                low=float(payload.get('low', 0)),
+                close=float(payload.get('close', 0)),
+                volume=float(payload.get('volume', 0)),
+            )
+            self._process_kline(kline)
+        except Exception as e:
+            pass  # 静默处理，避免影响事件总线
+
+    def _on_trade_event(self, event: Event):
+        """处理成交更新事件（同步持仓状态）"""
+        payload = event.payload
+        side = payload.get('side', '')
+        size = float(payload.get('size', 0))
+        price = float(payload.get('price', 0))
+
+        with self._lock:
+            if side == 'buy':
+                self._position += size
+                if self._position > 0 and self._entry_price == 0:
+                    self._entry_price = price
+                    self._entry_time = int(time.time() * 1000)
+            elif side == 'sell':
+                self._position -= size
+                if self._position <= 0:
+                    self._entry_price = 0.0
+                    self._entry_time = 0
+
+    # ─── 核心策略逻辑 ─────────────────────────────────────────
+
+    def _process_kline(self, kline: Kline):
+        """处理新 K线"""
+        with self._lock:
+            self._klines.append(kline)
+            # 限制最大数量
+            if len(self._klines) > self._kline_max_bars:
+                self._klines = self._klines[-self._kline_max_bars:]
+            self._last_kline_time = kline.close_time
+
+        # 需要足够数据
+        if len(self._klines) < max(self._ma_period, self._atr_period) + 5:
+            return
+
+        # 计算指标
+        closes = [k.close for k in self._klines]
+        ma26 = IndicatorEngine.sma(closes, self._ma_period)
+        atr = IndicatorEngine.atr(self._klines, self._atr_period)
+        trend_str = IndicatorEngine.trend_strength(self._klines, self._ma_period)
+
+        if ma26 is None or atr is None:
+            return
+
+        current_price = kline.close
+
+        # 计算通道
+        upper_band = ma26 + self._band_multiplier * atr
+        lower_band = ma26 - self._band_multiplier * atr
+
+        # 生成信号
+        signal = self._evaluate_signal(
+            current_price=current_price,
+            ma26=ma26,
+            atr=atr,
+            upper_band=upper_band,
+            lower_band=lower_band,
+            trend_strength=trend_str,
+            kline=kline,
+        )
+
+        if signal:
+            self._emit_signal(signal)
+
+    def _evaluate_signal(
+        self,
+        current_price: float,
+        ma26: float,
+        atr: float,
+        upper_band: float,
+        lower_band: float,
+        trend_strength: float,
+        kline: Kline,
+    ) -> Optional[TradeSignal]:
+        """
+        评估是否产生交易信号。
+        """
+        timestamp = int(time.time() * 1000)
+
+        # 已有持仓时的管理
+        if self._position > 0:
+            # 多仓管理
+            # 1. 止损检查
+            stop_loss = self._entry_price - 2 * atr
+            if current_price <= stop_loss:
+                return TradeSignal(
+                    signal_type=SignalType.STOP_LOSS,
+                    symbol=self._symbol,
+                    price=current_price,
+                    timestamp=timestamp,
+                    ma26=ma26,
+                    atr=atr,
+                    upper_band=upper_band,
+                    lower_band=lower_band,
+                    stop_loss_price=stop_loss,
+                    reason=f"Stop loss triggered: {current_price} <= {stop_loss:.2f}",
+                )
+
+            # 2. 止盈检查
+            take_profit = self._entry_price + 3 * atr
+            if current_price >= take_profit:
+                return TradeSignal(
+                    signal_type=SignalType.TAKE_PROFIT,
+                    symbol=self._symbol,
+                    price=current_price,
+                    timestamp=timestamp,
+                    ma26=ma26,
+                    atr=atr,
+                    upper_band=upper_band,
+                    lower_band=lower_band,
+                    take_profit_price=take_profit,
+                    reason=f"Take profit triggered: {current_price} >= {take_profit:.2f}",
+                )
+
+            # 3. 回归平仓
+            distance_from_ma = abs(current_price - ma26) / ma26
+            if distance_from_ma < self._detach * 0.5:
+                return TradeSignal(
+                    signal_type=SignalType.CLOSE_LONG,
+                    symbol=self._symbol,
+                    price=current_price,
+                    timestamp=timestamp,
+                    ma26=ma26,
+                    atr=atr,
+                    upper_band=upper_band,
+                    lower_band=lower_band,
+                    reason=f"Price returned to MA (detach={distance_from_ma:.4f})",
+                )
+
+            return None  # 持仓中，无新信号
+
+        elif self._position < 0:
+            # 空仓管理
+            stop_loss = self._entry_price + 2 * atr
+            if current_price >= stop_loss:
+                return TradeSignal(
+                    signal_type=SignalType.STOP_LOSS,
+                    symbol=self._symbol,
+                    price=current_price,
+                    timestamp=timestamp,
+                    ma26=ma26,
+                    atr=atr,
+                    upper_band=upper_band,
+                    lower_band=lower_band,
+                    stop_loss_price=stop_loss,
+                    reason=f"Stop loss triggered: {current_price} >= {stop_loss:.2f}",
+                )
+
+            take_profit = self._entry_price - 3 * atr
+            if current_price <= take_profit:
+                return TradeSignal(
+                    signal_type=SignalType.TAKE_PROFIT,
+                    symbol=self._symbol,
+                    price=current_price,
+                    timestamp=timestamp,
+                    ma26=ma26,
+                    atr=atr,
+                    upper_band=upper_band,
+                    lower_band=lower_band,
+                    take_profit_price=take_profit,
+                    reason=f"Take profit triggered: {current_price} <= {take_profit:.2f}",
+                )
+
+            distance_from_ma = abs(current_price - ma26) / ma26
+            if distance_from_ma < self._detach * 0.5:
+                return TradeSignal(
+                    signal_type=SignalType.CLOSE_SHORT,
+                    symbol=self._symbol,
+                    price=current_price,
+                    timestamp=timestamp,
+                    ma26=ma26,
+                    atr=atr,
+                    upper_band=upper_band,
+                    lower_band=lower_band,
+                    reason=f"Price returned to MA (detach={distance_from_ma:.4f})",
+                )
+
+            return None
+
+        else:
+            # 空仓 → 寻找入场机会
+            # 趋势强度过滤
+            if trend_strength < self._trend_strength:
+                return None
+
+            # 做多条件：价格 > MA26 且突破上轨
+            if current_price > ma26 and current_price >= upper_band:
+                strength = SignalStrength.STRONG if trend_strength > 0.8 else SignalStrength.MODERATE
+                suggested_size = self._calculate_position_size(current_price, atr)
+
+                return TradeSignal(
+                    signal_type=SignalType.BUY,
+                    symbol=self._symbol,
+                    price=current_price,
+                    timestamp=timestamp,
+                    strength=strength,
+                    ma26=ma26,
+                    atr=atr,
+                    upper_band=upper_band,
+                    lower_band=lower_band,
+                    suggested_size=suggested_size,
+                    stop_loss_price=current_price - 2 * atr,
+                    take_profit_price=current_price + 3 * atr,
+                    reason=f"Bullish breakout: price={current_price:.2f} > upper_band={upper_band:.2f}, trend={trend_strength:.2f}",
+                )
+
+            # 做空条件：价格 < MA26 且突破下轨
+            if current_price < ma26 and current_price <= lower_band:
+                strength = SignalStrength.STRONG if trend_strength > 0.8 else SignalStrength.MODERATE
+                suggested_size = self._calculate_position_size(current_price, atr)
+
+                return TradeSignal(
+                    signal_type=SignalType.SELL,
+                    symbol=self._symbol,
+                    price=current_price,
+                    timestamp=timestamp,
+                    strength=strength,
+                    ma26=ma26,
+                    atr=atr,
+                    upper_band=upper_band,
+                    lower_band=lower_band,
+                    suggested_size=suggested_size,
+                    stop_loss_price=current_price + 2 * atr,
+                    take_profit_price=current_price - 3 * atr,
+                    reason=f"Bearish breakout: price={current_price:.2f} < lower_band={lower_band:.2f}, trend={trend_strength:.2f}",
+                )
+
+        return None
+
+    def _calculate_position_size(self, price: float, atr: float) -> float:
+        """
+        基于 ATR 的仓位计算。
+        size = (equity × risk_per_trade) / ATR_dollar
+        """
+        equity = 100000.0  # 默认权益，实际应从组合模块获取
+        if self._config_mgr:
+            equity = self._config_mgr.get_float("initial_equity", equity)
+
+        if atr <= 0 or price <= 0:
+            return 0.0
+
+        # ATR 美元价值
+        atr_dollar = atr
+
+        # 风险金额
+        risk_amount = equity * self._risk_per_trade
+
+        # 基础仓位（按 ATR 风险计算）
+        size = risk_amount / atr_dollar
+
+        # 限制最大仓位
+        max_size = self._max_position_size / price
+        size = min(size, max_size)
+
+        # 最小交易单位
+        min_size = 0.001
+        if size < min_size:
+            return 0.0
+
+        return round(size, 3)
+
+    def _emit_signal(self, signal: TradeSignal):
+        """发布信号事件"""
+        self._last_signal = signal
+        self._signal_count += 1
+
+        if self._event_bus:
+            self._event_bus.publish(Event(
+                event_type=EventType.SIGNAL_GENERATED,
+                source="m01_strategy",
+                payload=signal.to_dict(),
             ))
 
-        ma = self._ma26.update(bar)
-        atr = self._atr14.update(bar)
+    # ─── 公共接口（供测试和外部调用） ──────────────────────────
 
-        self._state.ma26 = ma
-        self._state.atr14 = atr
-        self._state.upper_band = ma + self._tape_band_mult * atr
-        self._state.lower_band = ma - self._tape_band_mult * atr
-        self._state.is_tape = self._state.lower_band <= bar.close <= self._state.upper_band
-
-        if bar.close > ma:
-            self._state.direction = "BULL"
-        elif bar.close < ma:
-            self._state.direction = "BEAR"
-        else:
-            self._state.direction = "FLAT"
-
-        return Result.ok(self._state)
-
-    def get_state(self) -> IndicatorState:
-        return self._state
-
-    def is_ready(self) -> bool:
-        """指标是否完成预热"""
-        return (self._ma26.is_ready() and self._atr14.is_ready() and
-                self._bar_count >= self._warmup_bars)
-
-    # ─── 信号评估 ───
-
-    def evaluate(self, bar: Bar, ctx: Optional[TraceContext] = None) -> Result[List[SignalRequest], Error]:
+    def feed_kline(self, kline: Kline) -> Optional[TradeSignal]:
         """
-        评估当前K线，生成交易信号。
-
-        返回 Result[List[SignalRequest], Error]。
-        空列表表示无信号（贴线内或预热中）。
+        手动喂入 K线（用于回测和测试）。
+        返回生成的信号（如果有）。
         """
-        self._bar_count += 1
-        self._bars_processed += 1
+        self._process_kline(kline)
+        return self._last_signal if self._last_signal and self._last_signal.timestamp >= kline.close_time else None
 
-        # 更新指标
-        state_result = self.update_indicators(bar)
-        if state_result.is_err():
-            return Result.err(state_result.error)
+    def get_current_indicators(self) -> dict:
+        """获取当前指标值"""
+        if len(self._klines) < max(self._ma_period, self._atr_period):
+            return {}
 
-        state = state_result.unwrap()
+        closes = [k.close for k in self._klines]
+        ma26 = IndicatorEngine.sma(closes, self._ma_period)
+        atr = IndicatorEngine.atr(self._klines, self._atr_period)
+        trend_str = IndicatorEngine.trend_strength(self._klines, self._ma_period)
 
-        # 预热期不交易
-        if not self.is_ready():
-            return Result.ok([])
+        if ma26 is None or atr is None:
+            return {}
 
-        signals: List[SignalRequest] = []
-        trace_id = ctx.trace_id if ctx else ""
+        return {
+            'ma26': round(ma26, 4),
+            'atr': round(atr, 4),
+            'upper_band': round(ma26 + self._band_multiplier * atr, 4),
+            'lower_band': round(ma26 - self._band_multiplier * atr, 4),
+            'trend_strength': round(trend_str, 4),
+            'current_price': self._klines[-1].close if self._klines else 0,
+            'position': self._position,
+        }
 
-        # 去重：同一方向近期已发过信号
-        if bar.bar_index - self._last_signal_bar <= self._signal_dedup_bars:
-            return Result.ok([])
-
-        # ── 判定逻辑 ──
-        close = bar.close
-
-        if state.direction == "BULL":
-            # 贴线脱离（向上突破上轨）
-            breakout = close - state.upper_band
-            if state.is_tape and breakout >= self._breakout_mult * state.atr14:
-                if self._position_side != "LONG":
-                    sig = SignalRequest(
-                        signal_id=f"sig_{bar.bar_index}_OPEN_LONG",
-                        action="OPEN_LONG",
-                        direction="BULL",
-                        qty=0.0,
-                        price=close,
-                        order_type="LIMIT",
-                        strength=min(breakout / (state.atr14 + 1e-12), 5.0),
-                        trace_id=trace_id,
-                        bar_index=bar.bar_index,
-                        extra={'ma26': state.ma26, 'atr14': state.atr14,
-                               'breakout': breakout},
-                    )
-                    signals.append(sig)
-                    self._last_signal_bar = bar.bar_index
-                    self._position_side = "LONG"
-
-            # 多头持仓中，跌破下轨 → 平仓
-            elif self._position_side == "LONG" and close < state.lower_band:
-                sig = SignalRequest(
-                    signal_id=f"sig_{bar.bar_index}_CLOSE_LONG",
-                    action="CLOSE_LONG",
-                    direction="BULL",
-                    qty=0.0,
-                    price=close,
-                    order_type="LIMIT",
-                    trace_id=trace_id,
-                    bar_index=bar.bar_index,
-                )
-                signals.append(sig)
-                self._last_signal_bar = bar.bar_index
-                self._position_side = "FLAT"
-
-        elif state.direction == "BEAR":
-            breakout = state.lower_band - close
-            if state.is_tape and breakout >= self._breakout_mult * state.atr14:
-                if self._allow_short and self._position_side != "SHORT":
-                    sig = SignalRequest(
-                        signal_id=f"sig_{bar.bar_index}_OPEN_SHORT",
-                        action="OPEN_SHORT",
-                        direction="BEAR",
-                        qty=0.0,
-                        price=close,
-                        order_type="LIMIT",
-                        strength=min(breakout / (state.atr14 + 1e-12), 5.0),
-                        trace_id=trace_id,
-                        bar_index=bar.bar_index,
-                        extra={'ma26': state.ma26, 'atr14': state.atr14,
-                               'breakout': breakout},
-                    )
-                    signals.append(sig)
-                    self._last_signal_bar = bar.bar_index
-                    self._position_side = "SHORT"
-
-            elif self._position_side == "SHORT" and close > state.upper_band:
-                sig = SignalRequest(
-                    signal_id=f"sig_{bar.bar_index}_CLOSE_SHORT",
-                    action="CLOSE_SHORT",
-                    direction="BEAR",
-                    qty=0.0,
-                    price=close,
-                    order_type="LIMIT",
-                    trace_id=trace_id,
-                    bar_index=bar.bar_index,
-                )
-                signals.append(sig)
-                self._last_signal_bar = bar.bar_index
-                self._position_side = "FLAT"
-
-        # 发布信号事件
-        if signals and self._event_bus:
-            for sig in signals:
-                self._event_bus.publish_from(
-                    self.MODULE_NAME, EventType.SIGNAL_GENERATED,
-                    trace_id=sig.trace_id,
-                    bar_index=bar.bar_index,
-                    signal=sig.__dict__,
-                )
-                self._signals_generated += 1
-
-        return Result.ok(signals)
-
-    def _on_bar_event(self, event):
-        """事件总线回调：BAR_PROCESSED"""
-        bar_data = event.data.get('bar')
-        if not bar_data:
-            return
-        bar = Bar(**bar_data)
-        ctx = TraceContext(trace_id=event.trace_id, bar_index=event.bar_index)
-        self.evaluate(bar, ctx)
-
-    # ─── 仓位反馈 ───
-
-    def notify_position_closed(self):
-        """外部通知仓位已平仓，重置方向状态"""
-        self._position_side = "FLAT"
-
-    def set_position_side(self, side: str):
-        """由M05持仓同步（恢复快照时调用）"""
-        if side in ("FLAT", "LONG", "SHORT"):
-            self._position_side = side
-
-    # ─── 状态导出/导入 ───
-
-    def state_export(self) -> dict:
-        base = super().state_export()
-        base.update({
-            'position_side': self._position_side,
-            'bar_count': self._bar_count,
-            'last_signal_bar': self._last_signal_bar,
-            'signals_generated': self._signals_generated,
-            'bars_processed': self._bars_processed,
-            'indicators': {
-                'ma26': self._state.ma26,
-                'atr14': self._state.atr14,
-                'direction': self._state.direction,
-                'is_tape': self._state.is_tape,
-            },
-        })
-        return base
-
-    def state_import(self, state: dict) -> Result[None, Error]:
-        self._position_side = state.get('position_side', 'FLAT')
-        self._bar_count = state.get('bar_count', 0)
-        self._last_signal_bar = state.get('last_signal_bar', -999)
-        self._signals_generated = state.get('signals_generated', 0)
-        self._bars_processed = state.get('bars_processed', 0)
-        return Result.ok(None)
-
-    # ─── 健康检查 ───
-
-    def health_check(self) -> dict:
-        base = super().health_check()
-        base['details'].update({
-            'ma26_ready': self._ma26.is_ready(),
-            'atr14_ready': self._atr14.is_ready(),
-            'is_ready': self.is_ready(),
-            'position_side': self._position_side,
-            'bars_processed': self._bars_processed,
-            'signals_generated': self._signals_generated,
-            'direction': self._state.direction,
-            'is_tape': self._state.is_tape,
-            'ma26': round(self._state.ma26, 4),
-            'atr14': round(self._state.atr14, 4),
-        })
-        return base
-
+    def reset(self):
+        """重置策略状态"""
+        with self._lock:
+            self._klines.clear()
+            self._position = 0
+            self._entry_price = 0.0
+            self._entry_time = 0
+            self._last_signal = None
+            self._signal_count = 0
