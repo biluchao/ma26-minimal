@@ -1,0 +1,24 @@
+"""
+src/__init__.py
+MA26-ATR 量化交易系统 — 顶层包
+
+版本: v4.1.0-minimal
+架构: 模块化事件驱动，23模块 + 10根支柱
+"""
+
+__version__ = "4.1.0-minimal"
+__author__ = "system"
+
+# 运行模式常量
+MODE_BACKTEST = "backtest"
+MODE_PAPER = "paper"
+MODE_LIVE = "live"
+MODE_DRY_RUN = "dry_run"
+
+# 系统状态常量
+STATE_INITIALIZING = "INITIALIZING"
+STATE_RUNNING = "RUNNING"
+STATE_STOPPING = "STOPPING"
+STATE_STOPPED = "STOPPED"
+STATE_ERROR = "ERROR"
+STATE_READONLY = "READONLY"
