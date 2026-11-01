@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Secrets
+.env
+.env.*
+*.key
+*.pem
+!test_*.key
+
+# Runtime artifacts
+snapshots_*/
+traces/
+*.jsonl
+data/
+backtest_*.json
+reports/
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+*.cover
+
