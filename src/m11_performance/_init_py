@@ -1,6 +1,26 @@
-"""m11_performance — Performance analyzer"""
+"""
+src/m11_performance/__init__.py
+M11 — 绩效统计模块
 
-from .analyzer import PerformanceAnalyzer
+胜率 / Sharpe / 盈亏比 / 连续盈亏 / 统计快照
+"""
 
-__all__ = ['PerformanceAnalyzer']
+from .performance import (
+    PerformanceTracker,
+    TradeRecord,
+    PerformanceSnapshot,
+    WinLossRatio,
+    SharpeCalculator,
+    DrawdownStats,
+    TradeStatistics,
+)
 
+__all__ = [
+    "PerformanceTracker",
+    "TradeRecord",
+    "PerformanceSnapshot",
+    "WinLossRatio",
+    "SharpeCalculator",
+    "DrawdownStats",
+    "TradeStatistics",
+]
