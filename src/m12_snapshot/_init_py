@@ -1,6 +1,24 @@
-"""m11_performance — Performance analyzer"""
+"""
+src/m12_snapshot/__init__.py
+M12 — 崩溃恢复快照模块
 
-from .analyzer import PerformanceAnalyzer
+原子写 / 版本化快照 / 启动自动恢复 / 校验和
+"""
 
-__all__ = ['PerformanceAnalyzer']
+from .snapshot import (
+    SnapshotManager,
+    SystemSnapshot,
+    SnapshotMetadata,
+    AtomicFileWriter,
+    SnapshotVersion,
+    RecoveryResult,
+)
 
+__all__ = [
+    "SnapshotManager",
+    "SystemSnapshot",
+    "SnapshotMetadata",
+    "AtomicFileWriter",
+    "SnapshotVersion",
+    "RecoveryResult",
+]
