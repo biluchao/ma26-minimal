@@ -1,24 +1,24 @@
 """
-src/__init__.py
-MA26-ATR 量化交易系统 — 顶层包
+src/m03_kline/__init__.py
+M03 — K线缓存与聚合模块
 
-版本: v4.1.0-minimal
-架构: 模块化事件驱动，23模块 + 10根支柱
+接收Tick流 → 聚合为K线 → 维护滑动窗口 → 触发指标重算
 """
 
-__version__ = "4.1.0-minimal"
-__author__ = "system"
+from .kline_cache import (
+    KlineCache,
+    KlineBar,
+    KlineInterval,
+    KlineWindow,
+    TickData,
+    AggregationState,
+)
 
-# 运行模式常量
-MODE_BACKTEST = "backtest"
-MODE_PAPER = "paper"
-MODE_LIVE = "live"
-MODE_DRY_RUN = "dry_run"
-
-# 系统状态常量
-STATE_INITIALIZING = "INITIALIZING"
-STATE_RUNNING = "RUNNING"
-STATE_STOPPING = "STOPPING"
-STATE_STOPPED = "STOPPED"
-STATE_ERROR = "ERROR"
-STATE_READONLY = "READONLY"
+__all__ = [
+    "KlineCache",
+    "KlineBar",
+    "KlineInterval",
+    "KlineWindow",
+    "TickData",
+    "AggregationState",
+]
