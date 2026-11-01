@@ -1,0 +1,61 @@
+"""
+src/__init__.py
+MA26 Quant System — 源码包根初始化
+
+版本: 4.1.0-minimal
+职责: 包标识、版本声明、顶层便捷导入
+"""
+
+__version__ = "4.1.0-minimal"
+__author__ = "system"
+__description__ = "MA26 ATR Trend Trading System — Minimal Runtime Set"
+
+# ─── 核心类型便捷导入（可选，方便外部直接 from src import Result） ───
+from .core.result import Result, Ok, Err, Error, ErrorSeverity
+from .core.event_bus import EventBus, EventType
+from .core.trace_context import TraceContext
+from .core.config_snapshot import ConfigSnapshot
+from .core.state_registry import StateRegistry
+from .core.lifecycle import SystemModule
+from .core.module_manifest import ModuleManifest, InterfaceSpec
+from .core.circuit_breaker import CircuitBreaker, CircuitConfig, CircuitState
+
+# ─── 模块版本映射（bootstrap用） ───
+MODULE_VERSIONS = {
+    "core": "1.0.0",
+    "m01_strategy": "4.1.0",
+    "m03_kline": "4.1.0",
+    "m04_risk": "4.1.0",
+    "m05_position": "4.1.0",
+    "m06_equity": "4.1.0",
+    "m07_execution": "4.1.0",
+    "m11_performance": "4.1.0",
+    "m12_snapshot": "4.1.0",
+    "m13_tracker": "4.1.0",
+}
+
+# ─── 运行模式常量 ───
+MODE_BACKTEST = "backtest"
+MODE_PAPER = "paper"
+MODE_LIVE = "live"
+MODE_DRY_RUN = "dry_run"
+
+VALID_MODES = (MODE_BACKTEST, MODE_PAPER, MODE_LIVE, MODE_DRY_RUN)
+
+# ─── 导出列表 ───
+__all__ = [
+    # 核心类型
+    "Result", "Ok", "Err", "Error", "ErrorSeverity",
+    # 基础设施
+    "EventBus", "EventType",
+    "TraceContext",
+    "ConfigSnapshot",
+    "StateRegistry",
+    "SystemModule",
+    "ModuleManifest", "InterfaceSpec",
+    "CircuitBreaker", "CircuitConfig", "CircuitState",
+    # 常量
+    "MODE_BACKTEST", "MODE_PAPER", "MODE_LIVE", "MODE_DRY_RUN", "VALID_MODES",
+    # 版本
+    "MODULE_VERSIONS", "__version__", "__description__",
+]
