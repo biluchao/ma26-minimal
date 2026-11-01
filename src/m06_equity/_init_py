@@ -1,6 +1,22 @@
-"""m06_equity — Equity manager"""
+"""
+src/m06_equity/__init__.py
+M06 — 权益追踪模块
 
-from .manager import EquityManager
+权益曲线 / 回撤跟踪 / 水位计算 / 资金利用率
+"""
 
-__all__ = ['EquityManager']
+from .equity_tracker import (
+    EquityTracker,
+    EquityPoint,
+    DrawdownLevel,
+    EquityCurve,
+    UtilizationMetrics,
+)
 
+__all__ = [
+    "EquityTracker",
+    "EquityPoint",
+    "DrawdownLevel",
+    "EquityCurve",
+    "UtilizationMetrics",
+]
