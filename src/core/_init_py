@@ -1,0 +1,21 @@
+"""core/__init__.py — Core infrastructure package"""
+
+from .result import (Result, Error, ErrorSeverity, Errors)
+from .event_bus import EventBus, Event, EventType, EventHandler
+from .trace_context import TraceContext, TraceManager, TraceSpan, TraceSpanContext
+from .config_snapshot import ConfigSnapshot, ConfigWatcher, ConfigChangeEvent
+from .state_registry import StateRegistry, StateDeclaration, StateAccessViolation
+from .lifecycle import SystemModule
+from .module_manifest import (ModuleManifest, DependencySpec,
+                             InterfaceSpec, DependencyResolver)
+
+__all__ = [
+    'Result', 'Error', 'ErrorSeverity', 'Errors',
+    'EventBus', 'Event', 'EventType', 'EventHandler',
+    'TraceContext', 'TraceManager', 'TraceSpan', 'TraceSpanContext',
+    'ConfigSnapshot', 'ConfigWatcher', 'ConfigChangeEvent',
+    'StateRegistry', 'StateDeclaration', 'StateAccessViolation',
+    'SystemModule',
+    'ModuleManifest', 'DependencySpec', 'InterfaceSpec', 'DependencyResolver',
+]
+
