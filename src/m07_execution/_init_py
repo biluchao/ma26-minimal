@@ -1,6 +1,26 @@
-"""m07_execution — Execution manager"""
+"""
+src/m07_execution/__init__.py
+M07 — 执行管理模块
 
-from .manager import ExecutionManager
+下单队列 / 幂等clientOrderId / 重试退避 / 部分成交处理
+"""
 
-__all__ = ['ExecutionManager']
+from .execution_manager import (
+    ExecutionManager,
+    OrderRequest,
+    OrderResponse,
+    OrderState,
+    ExecutionQueue,
+    IdempotencyKey,
+    RetryPolicy,
+)
 
+__all__ = [
+    "ExecutionManager",
+    "OrderRequest",
+    "OrderResponse",
+    "OrderState",
+    "ExecutionQueue",
+    "IdempotencyKey",
+    "RetryPolicy",
+]
