@@ -1,21 +1,68 @@
-"""core/__init__.py — Core infrastructure package"""
+"""
+src/core/__init__.py
+核心基础设施包 — 10根支柱中的7个（最小运行集）
 
-from .result import (Result, Error, ErrorSeverity, Errors)
-from .event_bus import EventBus, Event, EventType, EventHandler
-from .trace_context import TraceContext, TraceManager, TraceSpan, TraceSpanContext
-from .config_snapshot import ConfigSnapshot, ConfigWatcher, ConfigChangeEvent
-from .state_registry import StateRegistry, StateDeclaration, StateAccessViolation
-from .lifecycle import SystemModule
-from .module_manifest import (ModuleManifest, DependencySpec,
-                             InterfaceSpec, DependencyResolver)
+导出所有核心原语，业务模块直接 from core import ...
+"""
+
+from .result import (
+    Result,
+    Error,
+    ErrorSeverity,
+    ErrorCategory,
+)
+from .circuit_breaker import (
+    CircuitBreaker,
+    CircuitConfig,
+    CircuitState,
+)
+from .event_bus import (
+    EventBus,
+    Event,
+    EventType,
+    IEventHandler,
+)
+from .trace_context import (
+    TraceContext,
+    TraceLevel,
+    get_current_trace,
+    set_current_trace,
+)
+from .config_snapshot import (
+    ConfigSnapshot,
+    ConfigSource,
+)
+from .state_registry import (
+    StateRegistry,
+    StateScope,
+)
+from .lifecycle import (
+    SystemModule,
+    ModuleState,
+    IModuleContainer,
+)
+from .module_manifest import (
+    ModuleManifest,
+    InterfaceSpec,
+    DependencySpec,
+    VersionRange,
+)
 
 __all__ = [
-    'Result', 'Error', 'ErrorSeverity', 'Errors',
-    'EventBus', 'Event', 'EventType', 'EventHandler',
-    'TraceContext', 'TraceManager', 'TraceSpan', 'TraceSpanContext',
-    'ConfigSnapshot', 'ConfigWatcher', 'ConfigChangeEvent',
-    'StateRegistry', 'StateDeclaration', 'StateAccessViolation',
-    'SystemModule',
-    'ModuleManifest', 'DependencySpec', 'InterfaceSpec', 'DependencyResolver',
+    # result
+    "Result", "Error", "ErrorSeverity", "ErrorCategory",
+    # circuit_breaker
+    "CircuitBreaker", "CircuitConfig", "CircuitState",
+    # event_bus
+    "EventBus", "Event", "EventType", "IEventHandler",
+    # trace_context
+    "TraceContext", "TraceLevel", "get_current_trace", "set_current_trace",
+    # config_snapshot
+    "ConfigSnapshot", "ConfigSource",
+    # state_registry
+    "StateRegistry", "StateScope",
+    # lifecycle
+    "SystemModule", "ModuleState", "IModuleContainer",
+    # module_manifest
+    "ModuleManifest", "InterfaceSpec", "DependencySpec", "VersionRange",
 ]
-
