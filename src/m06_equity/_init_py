@@ -1,0 +1,6 @@
+"""m06_equity — Equity manager"""
+
+from .manager import EquityManager
+
+__all__ = ['EquityManager']
+
