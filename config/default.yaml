@@ -1,0 +1,40 @@
+# MA26-ATR Minimal Runtime — Backtest config
+
+mode: backtest
+symbol: BTCUSDT
+timeframe: 1h
+
+warmup:
+  bars: 35
+
+strategy:
+  ma_period: 26
+  atr_period: 14
+  trend_atr_mult: 0.5
+  attach_atr_dist: 0.5
+  detach_atr_mult: 0.3
+  trailing_atr_mult: 2.0
+  tp_atr_mult: 3.0
+  stop_atr_mult: 2.0
+  max_size_pct: 0.25
+  step_size: 0.001
+  min_qty: 0.001
+  min_notional: 10.0
+  qty_decimals: 3
+  price_decimals: 2
+
+risk:
+  max_position_pct: 0.95
+  max_single_loss_pct: 0.02
+  max_daily_loss_pct: 0.05
+  max_drawdown_pct: 0.15
+  max_open_orders: 5
+  max_slippage_bps: 50
+
+equity:
+  initial_cash: 10000.0
+
+state:
+  snapshot_interval_bars: 50
+  snapshots_keep: 100
+
